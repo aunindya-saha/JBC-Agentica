@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+/* Custom global styles */
+@layer base{
+    body {
+        @apply font-sans bg-gray-50 text-gray-800 h-full;
+        font-family: "Poppins", sans-serif;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+        @apply font-bold;
+    }
+
+    a {
+        @apply text-blue-500 hover:text-blue-700;
+    }
+
+    button {
+        @apply bg-blue-500 text-white rounded-lg px-4 py-2 hover:bg-blue-600;
+    }
+
+    html, body, #root {
+        height: 100%;
+        min-height: 100vh;
+    }
+}
+@layer utilities {
+    .backdrop-frost {
+      backdrop-filter: blur(20px);
+    }
+  }
+
+@keyframes jump {
+  0%   { transform: translateY(0); }
+  20%  { transform: translateY(-10px); }
+  40%  { transform: translateY(-20px); }
+  60%  { transform: translateY(-10px); }
+  80%  { transform: translateY(0); }
+  100% { transform: translateY(0); }
+}
+
+@layer utilities {
+  .perspective { perspective: 1000px; }
+  .preserve-3d { transform-style: preserve-3d; }
+  .backface-hidden { backface-visibility: hidden; }
+  .rotate-y-180 { transform: rotateY(180deg); }
+  .jump-on-focus:focus {
+    animation: jump 0.4s cubic-bezier(.4,2,.6,1) 1;
+  }
+  .checkbox-transparent {
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+}
+
