@@ -105,24 +105,6 @@ npm run dev  # Runs the development server
 
 ---
 
-## 📸 UI Preview
-
-> *(Insert screenshots or screen recordings here)*
-
----
-
-## 🤝 Contributing
-
-Pull requests are welcome. For major changes, please open an issue first to discuss what you'd like to change.
-
----
-
-## 📃 License
-
-This project is licensed under the MIT License.
-
----
-
 ## ✨ Acknowledgements
 
 - [LangChain](https://www.langchain.com/)
