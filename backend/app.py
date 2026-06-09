@@ -6,46 +6,73 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import datetime
 import os
 import requests
+import psycopg2
+from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from flask_jwt_extended.exceptions import JWTExtendedException
 
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///chatbot.db'
+
+CORS(app, origins=os.getenv("ALLOWED_ORIGIN", "*"))
+
+def _make_connection():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        dbname=os.getenv("DB_NAME", "postgres"),
+        sslmode="require",
+    )
+
+app.config['SQLALCHEMY_DATABASE_URI'] = "postgresql+psycopg2://"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'super-secret-key'  # Change this in production
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = datetime.timedelta(hours=12)  # Token expiration time
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'creator': _make_connection,
+    'pool_pre_ping': True,
+}
+app.config['JWT_SECRET_KEY'] = os.getenv("JWT_SECRET_KEY")
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = datetime.timedelta(hours=12)
 
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
-load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-print("GROQ_API_KEY loaded:", GROQ_API_KEY)  # Debug: Remove in production
+
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
 
+
 class Message(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    sender = db.Column(db.String(10), nullable=False)  # 'user' or 'bot'
+    sender = db.Column(db.String(10), nullable=False)
     message = db.Column(db.Text, nullable=False)
-    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+    timestamp = db.Column(db.DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
-def get_user_by_username(username):
-    return User.query.filter_by(username=username).first()
 
-@app.before_request
-def create_tables():
+with app.app_context():
     db.create_all()
+
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    try:
+        db.session.execute(db.text('SELECT 1'))
+        return jsonify({'status': 'ok', 'db': 'connected'}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'db': str(e)}), 500
+
 
 @app.errorhandler(JWTExtendedException)
 def handle_jwt_errors(e):
     return jsonify({'msg': str(e), 'error': 'jwt_error'}), 401
+
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -54,57 +81,50 @@ def register():
     password = data.get('password')
     if not username or not password:
         return jsonify({'msg': 'Username and password required'}), 400
-    if get_user_by_username(username):
+    if User.query.filter_by(username=username).first():
         return jsonify({'msg': 'Username already exists'}), 400
-    hashed_pw = generate_password_hash(password)
-    user = User(username=username, password=hashed_pw)
+    user = User(username=username, password=generate_password_hash(password))
     db.session.add(user)
     db.session.commit()
     return jsonify({'msg': 'Registration successful'}), 201
+
 
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
-    user = get_user_by_username(username)
+    user = User.query.filter_by(username=username).first()
     if not user or not check_password_hash(user.password, password):
         return jsonify({'msg': 'Invalid credentials'}), 401
     access_token = create_access_token(identity=str(user.id))
     return jsonify({'access_token': access_token}), 200
 
-def summarize_conversation(messages):
-    summary = "\n".join([f"{msg.sender}: {msg.message}" for msg in messages])
-    return summary
 
-def format_prompt(summary, user_query):
-    return (
-        "You are a helpful assistant. "
-        f"Here's the conversation so far: {summary}. "
-        f"Now respond to this: {user_query}"
-    )
-
-def get_groq_response(prompt):
+def get_groq_response(messages_context, user_query):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
+    conversation = [{"role": "system", "content": "You are a helpful assistant."}]
+    for msg in messages_context:
+        role = "user" if msg.sender == "user" else "assistant"
+        conversation.append({"role": role, "content": msg.message})
+    conversation.append({"role": "user", "content": user_query})
+
     payload = {
         "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": conversation,
         "temperature": 1
     }
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        print("Groq API status:", response.status_code)  # Debug
-        print("Groq API response:", response.text)      # Debug
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as e:
-        print("Groq API error:", e)  # Debug
+        return response.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.RequestException:
         return "Sorry, I'm having trouble responding right now."
+
 
 @app.route('/api/chat', methods=['POST'])
 @jwt_required()
@@ -115,58 +135,52 @@ def chat():
 
     if not user_message:
         return jsonify({'msg': 'Message required'}), 400
-    
-    print("User message:", user_message)  # Debug
-    print("User ID:", user_id)  # Debug
 
-    # 1. Save user message
     msg = Message(user_id=user_id, sender='user', message=user_message)
     db.session.add(msg)
     db.session.commit()
 
-    # 2. Fetch last 5 messages (chronological order)
-    messages = (
+    recent = (
         Message.query
         .filter_by(user_id=user_id)
         .order_by(Message.timestamp.desc())
-        .limit(5)
+        .limit(10)
         .all()
     )
-    messages = list(reversed(messages))
+    recent = list(reversed(recent))
 
-    # 3. Summarize conversation
-    summary = summarize_conversation(messages)
+    bot_response = get_groq_response(recent[:-1], user_message)
 
-    # 4. Format prompt
-    prompt = format_prompt(summary, user_message)
-
-    # 5. Get bot response
-    bot_response = get_groq_response(prompt)
-
-    # 6. Save bot message
     bot_msg = Message(user_id=user_id, sender='bot', message=bot_response)
     db.session.add(bot_msg)
     db.session.commit()
 
-    # 7. Return to frontend
     return jsonify({'response': bot_response}), 200
+
 
 @app.route('/api/profile', methods=['GET'])
 @jwt_required()
 def profile():
     user_id = get_jwt_identity()
-    user = User.query.get(user_id)
+    user = db.session.get(User, int(user_id))
+    if not user:
+        return jsonify({'msg': 'User not found'}), 404
     return jsonify({'username': user.username}), 200
-from flask import current_app
+
 
 @app.route('/api/history', methods=['GET'])
 @jwt_required()
 def history():
     user_id = get_jwt_identity()
     messages = Message.query.filter_by(user_id=user_id).order_by(Message.timestamp).all()
-    history = [{'sender': m.sender, 'message': m.message, 'timestamp': m.timestamp.isoformat()} for m in messages]
-    return jsonify({'history': history}), 200
-                    
+    return jsonify({
+        'history': [
+            {'sender': m.sender, 'message': m.message, 'timestamp': m.timestamp.isoformat()}
+            for m in messages
+        ]
+    }), 200
+
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.getenv("PORT", 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
