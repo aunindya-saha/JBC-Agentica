@@ -15,7 +15,11 @@ load_dotenv()
 
 app = Flask(__name__)
 
-CORS(app, origins=os.getenv("ALLOWED_ORIGIN", "*"))
+CORS(app,
+     origins=os.getenv("ALLOWED_ORIGIN", "*"),
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"],
+     supports_credentials=True)
 
 def _make_connection():
     return psycopg2.connect(
